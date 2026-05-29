@@ -45,7 +45,7 @@ uv pip install -e .
 cd ..
 git clone https://github.com/galilai-group/stable-worldmodel.git
 cd stable-worldmodel
-git checkout 221ac82
+git checkout 221ac82  ## If it doesn't work, please see below
 uv pip install -e .
 
 
@@ -55,3 +55,13 @@ cd nerv
 git checkout v0.1.0   # tested with v0.1.0 release
 uv pip install -e .
 ```
+
+### 5. Stable-Worldmodel Manual Download Instruction
+
+- If git checkout doesn't work, please manually download [https://github.com/galilai-group/stable-worldmodel/tree/221ac820a1adea75bed99df45ab592bb5f42306c](https://github.com/galilai-group/stable-worldmodel/tree/221ac820a1adea75bed99df45ab592bb5f42306c) and locate under third_party folder.
+
+- If the link above also doesn't work, please download the zip file from : [https://drive.google.com/drive/folders/1Oll1ghHa8ySsGjPPTJE6o8XSG0Pvyks0?usp=sharing](https://drive.google.com/drive/folders/1Oll1ghHa8ySsGjPPTJE6o8XSG0Pvyks0?usp=sharing)
+
+Sorry for the inconvenience.
+
+
