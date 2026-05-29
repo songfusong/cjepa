@@ -112,23 +112,12 @@ ROOT_DIR/
 
 ## Push-T
 
-### 1. Download PushT for Stable-WorldModel
-* Download `pusht_expert_{train/val}_video` data from [link](https://drive.google.com/drive/folders/1M7PfMRzoSujcUkqZxEfwjzGBIpRMdl88).
-* Unzip and put them under `swm.data.utils.get_cache_dir()`. Default directory is `~/.stable_worldmodel/`. But you can put them anywhere and set the `cache_dir` argument in the file before running.
-```
-pip install gdown
-gdown https://drive.google.com/uc?id=1vpcCwxsFNEzsZbWSyei-qt_cw4OA7DT-
-gdown https://drive.google.com/uc?id=17m8-1JLF2nA7MZnVtvNmz3sFXcqGKxxQ
-tar --zstd -xvf pusht_expert_train_video.tar.zst
-tar --zstd -xvf pusht_expert_val_video.tar.zst
-```
-* Rename folder as a desired format.
-* This naming is required when you want to work with your own dataset: {dataset_name}_train and {dataset_name}_val. 
 
-```
-mv pusht_expert_train_video pusht_expert_train # so it should be .stable_worldmodel/pusht_expert_train
-mv pusht_expert_val_video pusht_expert_val  # sol it should be .stable_worldmodel/pusht_expert_val
-```
+### 1. Download PushT for Stable-WorldModel
+* Download `pusht_expert_{train/val}` data from [link](https://drive.google.com/drive/folders/19ST8nfhZ4rMxrTfh2kgBErCcS5Kk1o-D?usp=sharing).
+* Unzip and put them under `swm.data.utils.get_cache_dir()`. Default directory is `~/.stable_worldmodel/`. But you can put them anywhere and set the `cache_dir` argument in the file before running.
+* Do not change the folder name. This naming is required when you want to work with your own dataset: {dataset_name}_train and {dataset_name}_val. 
+
 
 This will give you
 
