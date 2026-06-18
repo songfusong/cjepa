@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-import numpy as np
 
 class NonCausalTransformer(nn.Module):
     """
@@ -57,6 +56,13 @@ class MaskedSlotPredictor(nn.Module):
         dim_head: int = 64,
         mlp_dim: int = 2048,
         dropout: float = 0.1,
+        event_conditioned_masking: bool = False,
+        masking_strategy: str = "random",
+        event_mask_p_base: float = 0.1,
+        event_mask_p_event: float = 0.5,
+        event_mask_min_slots = None,
+        event_mask_max_slots = None,
+        distance_threshold: float = 50.0,
     ):
         super().__init__()
         self.num_slots = num_slots
@@ -66,6 +72,13 @@ class MaskedSlotPredictor(nn.Module):
         self.total_frames = history_frames + pred_frames
         self.num_masked_slots = num_masked_slots
         self.seed = seed
+        self.event_conditioned_masking = event_conditioned_masking
+        self.masking_strategy = self._normalize_masking_strategy(masking_strategy)
+        self.event_mask_p_base = event_mask_p_base
+        self.event_mask_p_event = event_mask_p_event
+        self.event_mask_min_slots = num_masked_slots if event_mask_min_slots is None else event_mask_min_slots
+        self.event_mask_max_slots = event_mask_max_slots
+        self.distance_threshold = distance_threshold
         
         # 1. Learnable Mask Token (Query Base)
         # Represents the center of the manifold for any missing data
@@ -90,25 +103,100 @@ class MaskedSlotPredictor(nn.Module):
         # 5. Output Head
         self.to_out = nn.Linear(slot_dim, slot_dim)
 
+    @staticmethod
+    def _normalize_masking_strategy(masking_strategy: str) -> str:
+        aliases = {
+            "event": "event_window",
+            "event_conditioned": "event_window",
+            "contact_window": "contact",
+            "contact_binary": "contact",
+            "proximity": "distance",
+            "distance_to_robot": "distance",
+        }
+        strategy = str(masking_strategy or "random").lower()
+        return aliases.get(strategy, strategy)
+
     def get_mask_indices(self, batch_size, device):
         """
         Selects N slots to be masked per sample (or shared across batch).
         Here, we implement shared masking across the batch for simplicity, 
         but it can be easily made per-sample.
         """
-        rng = np.random.RandomState(self.seed)
-        
-        # Select N indices out of num_slots
-        masked_indices = rng.choice(self.num_slots, self.num_masked_slots, replace=False)
+        num_to_mask = min(self.num_masked_slots, self.num_slots)
+        masked_indices = torch.randperm(self.num_slots, device=device)[:num_to_mask]
         
         # Create boolean mask for logic (True = Masked/Target, False = Visible/Context)
         # This is strictly about "Slot" masking. Time masking logic is handled in prepare_input.
         is_slot_masked = torch.zeros(self.num_slots, dtype=torch.bool, device=device)
         is_slot_masked[masked_indices] = True
         
-        return is_slot_masked, torch.from_numpy(masked_indices).to(device)
+        return is_slot_masked, masked_indices
 
-    def prepare_input(self, x):
+    def get_num_maskable_slots(self):
+        return self.num_slots
+
+    def get_event_conditioned_mask(
+        self,
+        batch_size,
+        device,
+        event_window=None,
+        contact=None,
+        contact_distance=None,
+    ):
+        num_maskable_slots = max(min(self.get_num_maskable_slots(), self.num_slots), 0)
+        is_slot_masked = torch.zeros(batch_size, self.num_slots, dtype=torch.bool, device=device)
+        if num_maskable_slots == 0:
+            return is_slot_masked
+
+        if self.masking_strategy == "event_window":
+            event_signal = event_window
+        elif self.masking_strategy == "contact":
+            event_signal = contact
+        elif self.masking_strategy == "distance":
+            event_signal = contact_distance
+        else:
+            event_signal = event_window if event_window is not None else contact
+
+        if event_signal is None:
+            event_active = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        else:
+            event_signal = event_signal.to(device)
+            if event_signal.dim() == 0:
+                event_signal = event_signal.reshape(1).expand(batch_size)
+            event_signal = event_signal.reshape(batch_size, -1)
+            if self.masking_strategy == "distance":
+                event_active = event_signal.amin(dim=1) <= float(self.distance_threshold)
+            else:
+                event_active = event_signal.amax(dim=1) > 0
+
+        min_slots = int(self.event_mask_min_slots)
+        min_slots = max(0, min(min_slots, num_maskable_slots))
+        if self.event_mask_max_slots is None:
+            max_slots = num_maskable_slots
+        else:
+            max_slots = int(self.event_mask_max_slots)
+            max_slots = max(min_slots, min(max_slots, num_maskable_slots))
+
+        probs = torch.full((batch_size,), float(self.event_mask_p_base), device=device)
+        probs = probs + event_active.float() * float(self.event_mask_p_event)
+        probs = probs.clamp(0.0, 1.0)
+
+        counts = torch.distributions.Binomial(
+            total_count=num_maskable_slots,
+            probs=probs.to(dtype=torch.float32),
+        ).sample().long()
+        counts = counts.clamp(min_slots, max_slots)
+
+        # Sample a random ranking per example and pick the lowest-count slots.
+        ranking = torch.rand(batch_size, num_maskable_slots, device=device).argsort(dim=1)
+        ranks = torch.arange(num_maskable_slots, device=device).unsqueeze(0).expand(batch_size, -1)
+        object_mask = torch.zeros(batch_size, num_maskable_slots, dtype=torch.bool, device=device)
+        object_mask.scatter_(1, ranking, ranks < counts.unsqueeze(1))
+
+        is_slot_masked[:, :num_maskable_slots] = object_mask
+        return is_slot_masked
+
+    def prepare_input(self, x, event_window=None, contact=None, contact_distance=None):
         """
         Constructs the input sequence for the Transformer.
         
@@ -128,9 +216,19 @@ class MaskedSlotPredictor(nn.Module):
         device = x.device
         
         # 1. Get Mask Indices
-        if self.num_masked_slots > 0 :
+        if self.event_conditioned_masking and self.num_masked_slots > 0:
+            is_slot_masked = self.get_event_conditioned_mask(
+                B,
+                device,
+                event_window=event_window,
+                contact=contact,
+                contact_distance=contact_distance,
+            )
+            masked_indices = is_slot_masked
+        elif self.num_masked_slots > 0 :
             is_slot_masked, masked_indices = self.get_mask_indices(B, device)
         else:
+            is_slot_masked = torch.zeros(S, dtype=torch.bool, device=device)
             masked_indices = torch.tensor([], dtype=torch.long, device=device)
         
         # 2. Prepare Base Components
@@ -169,23 +267,19 @@ class MaskedSlotPredictor(nn.Module):
         final_input[:, 0, :, :] = x[:, 0, :, :] + self.time_pos_embed[:, 0, :, :]
         
         # (B) For UNMASKED (Context) slots, overwrite history (t=1 to T_hist-1)
-        # Filter indices for unmasked slots
-        if self.num_masked_slots > 0:
-            unmasked_indices = torch.where(~is_slot_masked)[0]
-        else:
-            unmasked_indices = torch.arange(0, x.shape[2])
-        
-        if len(unmasked_indices) > 0 and T_hist > 1:
-            # Extract real history for unmasked slots
-            # x[:, 1:, ...] matches T_hist-1 frames
-            real_history = x[:, 1:, unmasked_indices, :]
-            
-            # Add corresponding TimePE
-            history_pos = self.time_pos_embed[:, 1:T_hist, :, :].expand(B, T_hist-1, S, D)
-            history_pos_unmasked = history_pos[:, :, unmasked_indices, :]
-            
-            # Overwrite in final_input
-            final_input[:, 1:T_hist, unmasked_indices, :] = real_history + history_pos_unmasked
+        if T_hist > 1:
+            real_history = x[:, 1:, :, :]
+            history_pos = self.time_pos_embed[:, 1:T_hist, :, :].expand(B, T_hist - 1, S, D)
+            real_history_with_pos = real_history + history_pos
+            if is_slot_masked.dim() == 1:
+                visible_history = (~is_slot_masked).reshape(1, 1, S, 1)
+            else:
+                visible_history = (~is_slot_masked).reshape(B, 1, S, 1)
+            final_input[:, 1:T_hist, :, :] = torch.where(
+                visible_history,
+                real_history_with_pos,
+                final_input[:, 1:T_hist, :, :],
+            )
 
         # Note: 
         # - Masked slots at t >= 1 remain as "Query Input".
@@ -297,7 +391,7 @@ class MaskedSlotPredictor(nn.Module):
         
         return out, masked_indices, attention_dict
 
-    def forward(self, x):
+    def forward(self, x, event_window=None, contact=None, contact_distance=None):
         """
         Args:
             x: (B, T_hist, S, D)
@@ -306,7 +400,12 @@ class MaskedSlotPredictor(nn.Module):
         B, T_hist, S, D = x.shape
         
         # 1. Prepare Input (Mix of Real Data and Queries)
-        x_input, masked_indices = self.prepare_input(x) # (B, T_total, S, D)
+        x_input, masked_indices = self.prepare_input(
+            x,
+            event_window=event_window,
+            contact=contact,
+            contact_distance=contact_distance,
+        ) # (B, T_total, S, D)
         
         # 2. Flatten for Transformer: (B, T*S, D)
         x_flat = rearrange(x_input, 'b t s d -> b (t s) d')
@@ -340,6 +439,13 @@ class MaskedSlot_AP_Predictor(MaskedSlotPredictor):
         mlp_dim: int = 2048,
         dropout: float = 0.1,
         future_action_conditioning: bool = False,  # If True, includes action conditioning in future frames
+        event_conditioned_masking: bool = False,
+        masking_strategy: str = "random",
+        event_mask_p_base: float = 0.1,
+        event_mask_p_event: float = 0.5,
+        event_mask_min_slots = None,
+        event_mask_max_slots = None,
+        distance_threshold: float = 50.0,
     ):
         super().__init__(
             num_slots=num_slots,
@@ -353,20 +459,31 @@ class MaskedSlot_AP_Predictor(MaskedSlotPredictor):
             dim_head=dim_head,
             mlp_dim=mlp_dim,
             dropout=dropout,
+            event_conditioned_masking=event_conditioned_masking,
+            masking_strategy=masking_strategy,
+            event_mask_p_base=event_mask_p_base,
+            event_mask_p_event=event_mask_p_event,
+            event_mask_min_slots=event_mask_min_slots,
+            event_mask_max_slots=event_mask_max_slots,
+            distance_threshold=distance_threshold,
         )
 
         self.future_action_conditioning = future_action_conditioning
 
+    def get_num_maskable_slots(self):
+        # Exclude the last 2 slots: proprio and action.
+        return max(self.num_slots - 2, 0)
+
     def get_mask_indices(self, batch_size, device):
-        rng = np.random.RandomState(self.seed)
-        
-        # Select N indices out of num_slots
-        masked_indices = rng.choice(self.num_slots-2, self.num_masked_slots, replace=False) # excluding the last 2 slots: proprio and action
+        # Select N indices out of object slots, excluding the last 2 slots: proprio and action.
+        num_object_slots = max(self.num_slots - 2, 0)
+        num_to_mask = min(self.num_masked_slots, num_object_slots)
+        masked_indices = torch.randperm(num_object_slots, device=device)[:num_to_mask]
         
         # Create boolean mask for logic (True = Masked/Target, False = Visible/Context)
         # This is strictly about "Slot" masking. Time masking logic is handled in prepare_input.
         is_slot_masked = torch.zeros(self.num_slots, dtype=torch.bool, device=device)
         is_slot_masked[masked_indices] = True
         
-        return is_slot_masked, torch.from_numpy(masked_indices).to(device)
+        return is_slot_masked, masked_indices
     

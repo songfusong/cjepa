@@ -11,7 +11,7 @@ hydra:
 wandb:
   enable: true
   project: cjepa_predictor_only
-  entity: heejeong_nam-brown-university
+  entity: songfusong-sun-yat-sen-university
 
 
 use_hungarian_matching: false
@@ -19,16 +19,19 @@ hungarian_cost_type: mse  # options: mse, l1
 
 
 dataset_name: pusht_expert
-embedding_dir: '/your/own/path/slots.pkl'
+embedding_dir: '/home/jiaoyihang/.stable_worldmodel/artifacts/pusht/pusht_videosaur_slots.pkl'
 cache_dir: "~/.stable_worldmodel"
-action_dir: '/your/own/path/pusht_expert_action_meta.pkl'
-proprio_dir: '/your/own/path/pusht_expert_proprio_meta.pkl'
-state_dir: '/your/own/path/pusht_expert_state_meta.pkl'
+action_dir: '/home/jiaoyihang/.stable_worldmodel/artifacts/pusht/pusht_expert_action_meta.pkl'
+proprio_dir: '/home/jiaoyihang/.stable_worldmodel/artifacts/pusht/pusht_expert_proprio_meta.pkl'
+state_dir: '/home/jiaoyihang/.stable_worldmodel/artifacts/pusht/pusht_expert_state_meta.pkl'
+contact_event_dir: '/home/jiaoyihang/.stable_worldmodel/artifacts/pusht/pusht_expert_contact_event_meta.pkl'
+contact_event_fields: full
 
 output_model_name: causal_world_model
 training_type: video  # options: video, wm
 
 trainer:
+  default_root_dir: ${hydra:runtime.output_dir}
   max_epochs: 100
   # strategy: ddp 
   devices: auto
@@ -36,8 +39,9 @@ trainer:
   precision: 16-mixed
   log_every_n_steps: 1
 
-batch_size: 256
-num_workers: 10
+batch_size: 4096
+num_workers: 8
+num_val_workers: 0
 
 seed: 42
 
@@ -58,9 +62,18 @@ dinowm:
 # Masked Slot Predictor Configuration
 num_masked_slots: 2  # M: number of slots to mask during training
 
+ecojepa:
+  enabled: false
+  masking: event_conditioned
+  p_base: 0.10
+  p_event: 0.50
+  min_masked_slots: ${num_masked_slots}
+  max_masked_slots: null
+  distance_threshold: 50.0
+
 predictor:
   depth: 6
-  heads: 16
+  heads: 4
   mlp_dim: 2048
   dim_head: 64
   dropout: 0.1
@@ -86,7 +99,7 @@ videosaur:
   SIM_TEMP: 0.15
 
 model:
-  load_weights: "~/.stable_worldmodel/artifacts/oc-checkpoints/oc_ckpt.ckpt"
+  load_weights: "/home/jiaoyihang/.stable_worldmodel/artifacts/pusht/pusht_videosaur_model.ckpt"
   modules_to_load: None
   input_type: video
   visualize: true
@@ -193,4 +206,3 @@ dummy_trainer:
   log_every_n_steps: 1
   val_check_interval: 1000
   gradient_clip_val: 0.05
-

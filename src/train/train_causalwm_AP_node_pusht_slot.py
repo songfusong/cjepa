@@ -17,7 +17,7 @@ from einops import rearrange, repeat
 from torch.utils.data import DataLoader
 from transformers import AutoModel
 import wandb
-from src.world_models.dinowm_causal_AP_node import CausalWM_AP
+from src.world_models.dinowm_causal_AP_node import CausalWM_AP, Embedder
 from src.cjepa_predictor import MaskedSlot_AP_Predictor
 from src.third_party.videosaur.videosaur import models
 from src.custom_codes.hungarian import hungarian_matching_loss_AP, hungarian_matching_loss_with_proprio
@@ -51,6 +51,8 @@ def get_data(cfg):
         action_dir=cfg.action_dir,
         proprio_dir=cfg.proprio_dir,
         state_dir=cfg.get("state_dir", None),
+        contact_event_dir=cfg.get("contact_event_dir", None),
+        contact_event_fields=cfg.get("contact_event_fields", "full"),
         frameskip=cfg.frameskip,
         seed=cfg.seed,
     )
@@ -63,6 +65,8 @@ def get_data(cfg):
         action_dir=cfg.action_dir,
         proprio_dir=cfg.proprio_dir,
         state_dir=cfg.get("state_dir", None),
+        contact_event_dir=cfg.get("contact_event_dir", None),
+        contact_event_fields=cfg.get("contact_event_fields", "full"),
         frameskip=cfg.frameskip,
         seed=cfg.seed,
     )
@@ -76,8 +80,8 @@ def get_data(cfg):
         batch_size=cfg.batch_size,
         num_workers=cfg.num_workers,
         drop_last=True,
-        persistent_workers=True,
-        prefetch_factor=2,
+        persistent_workers=cfg.num_workers > 0,
+        prefetch_factor=2 if cfg.num_workers > 0 else None,
         pin_memory=True,
         shuffle=True,
         generator=rnd_gen,
@@ -105,6 +109,22 @@ def get_world_model(cfg):
     to maintain checkpoint compatibility.
     """
     
+    def _masked_slot_loss(pred_history, gt_history, mask_indices):
+        if mask_indices.dtype == torch.bool:
+            if mask_indices.dim() == 1:
+                mask_indices = mask_indices.unsqueeze(0).expand(gt_history.shape[0], -1)
+            loss_mask = mask_indices[:, None, :, None].to(dtype=pred_history.dtype)
+            valid_count = loss_mask.sum() * pred_history.shape[1] * pred_history.shape[-1]
+            if valid_count.item() == 0:
+                return pred_history.new_tensor(0.0)
+            squared_error = (pred_history - gt_history.detach()).pow(2)
+            return (squared_error * loss_mask).sum() / valid_count
+
+        return F.mse_loss(
+            pred_history[:, :, mask_indices, :],
+            gt_history[:, :, mask_indices, :].detach(),
+        )
+
     def forward(self, batch, stage):
         """
         Forward pass using pre-extracted slot embeddings.
@@ -151,10 +171,18 @@ def get_world_model(cfg):
         
         # Use history to predict next states
         history_embed = embedding[:, :cfg.dinowm.history_size, :, :]  # (B, history_size, S+2, 64)
+        event_window = batch.get("event_window", None)
+        contact = batch.get("contact", None)
+        contact_distance = batch.get("contact_distance", None)
         
 
         # Request mask information for selective loss
-        pred_output = self.model.predict(history_embed)
+        pred_output = self.model.predict(
+            history_embed,
+            event_window=event_window,
+            contact=contact,
+            contact_distance=contact_distance,
+        )
         slot_num = pixels_embed.shape[2]
         # Get config for Hungarian matching
         use_hungarian = cfg.get("use_hungarian_matching", False)
@@ -169,10 +197,7 @@ def get_world_model(cfg):
             
             # Loss on masked slots in history (no Hungarian matching for history - slots are aligned)
             gt_history = history_embed
-            loss_masked_history = F.mse_loss(
-                pred_history[:, :, mask_indices,  :],          #  action/proprio slots already excluded
-                gt_history[:, :, mask_indices,  :].detach()    #  action/proprio slots already excluded when selecting mask_indices
-            )
+            loss_masked_history = _masked_slot_loss(pred_history, gt_history, mask_indices)
 
             if use_hungarian:
                 # Hungarian matching for future slots
@@ -314,13 +339,20 @@ def get_world_model(cfg):
         dim_head=cfg.predictor.get("dim_head", 64),
         mlp_dim=cfg.predictor.get("mlp_dim", 2048),
         dropout=cfg.predictor.get("dropout", 0.1),
-        future_action_conditioning=cfg.predictor.get("future_action_conditioning", False)
+        future_action_conditioning=cfg.predictor.get("future_action_conditioning", False),
+        event_conditioned_masking=cfg.get("ecojepa", {}).get("enabled", False),
+        masking_strategy=cfg.get("ecojepa", {}).get("masking", "random"),
+        event_mask_p_base=cfg.get("ecojepa", {}).get("p_base", 0.1),
+        event_mask_p_event=cfg.get("ecojepa", {}).get("p_event", 0.5),
+        event_mask_min_slots=cfg.get("ecojepa", {}).get("min_masked_slots", cfg.get("num_masked_slots", 2)),
+        event_mask_max_slots=cfg.get("ecojepa", {}).get("max_masked_slots", cfg.get("num_masked_slots", 2)),
+        distance_threshold=cfg.get("ecojepa", {}).get("distance_threshold", 50.0),
     )
     
     # Build action and proprioception encoders (will be trained)
     effective_act_dim = cfg.frameskip * cfg.dinowm.action_dim
-    action_encoder = swm.wm.dinowm.Embedder(in_chans=effective_act_dim, emb_dim=cfg.videosaur.SLOT_DIM)
-    proprio_encoder = swm.wm.dinowm.Embedder(in_chans=cfg.dinowm.proprio_dim, emb_dim=cfg.videosaur.SLOT_DIM)
+    action_encoder = Embedder(in_chans=effective_act_dim, emb_dim=cfg.videosaur.SLOT_DIM)
+    proprio_encoder = Embedder(in_chans=cfg.dinowm.proprio_dim, emb_dim=cfg.videosaur.SLOT_DIM)
 
     logging.info(f"Action dim: {effective_act_dim}, Proprio dim: {cfg.dinowm.proprio_dim}")
 

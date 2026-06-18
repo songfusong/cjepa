@@ -30,6 +30,7 @@ output_model_name: causal_world_model
 training_type: video  # options: video, wm
 
 trainer:
+  default_root_dir: ${hydra:runtime.output_dir}
   max_epochs: 100
   # strategy: ddp 
   devices: auto

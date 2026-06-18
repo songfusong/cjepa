@@ -59,14 +59,21 @@ class FrameEncoder(nn.Module):
         attn = layer12.attention.attention  # Dinov2SelfAttention
 
         with torch.no_grad():
-            out = self.backbone(images, output_hidden_states=True)
+            out = self.backbone(images, output_hidden_states=True, return_dict=True)
 
         backbone_features = out.last_hidden_state.detach()[:, 1:, :]  # vit_block12
         vit_block12 = backbone_features
 
         # Derive keys directly to avoid per-forward hook registration overhead.
         # hidden_states[-2] is the input to block 12 (includes CLS at index 0).
-        hidden_states_pre12 = out.hidden_states[-2]
+        # Some pickled checkpoints keep a Dinov2Model instance that ignores the
+        # output_hidden_states flag after reload. Fall back to the final hidden
+        # state so planning can still use the encoder interface.
+        hidden_states_pre12 = (
+            out.hidden_states[-2]
+            if out.hidden_states is not None
+            else out.last_hidden_state
+        )
         normed_hidden = layer12.norm1(hidden_states_pre12)
         vit_block_keys12 = attn.key(normed_hidden)[:, 1:]
 

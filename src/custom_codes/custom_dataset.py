@@ -1,5 +1,5 @@
 import numpy as np
-from stable_worldmodel.data.dataset import VideoDataset, Dataset
+from stable_worldmodel.data.formats.video import VideoDataset
 import torch
 import stable_pretraining as spt
 import stable_worldmodel as swm
@@ -114,6 +114,8 @@ class PushTSlotDataset(Dataset):
         action_dir: str,
         proprio_dir: str,
         state_dir: str = None,
+        contact_event_dir: str = None,
+        contact_event_fields: str = "full",
         frameskip: int = 1,
         seed: int = 42,
     ):
@@ -125,6 +127,16 @@ class PushTSlotDataset(Dataset):
         self.frameskip = frameskip
         self.n_steps = history_size + num_preds
         self.seed = seed
+        self.contact_event_fields = contact_event_fields
+        self._contact_event_field_set = {
+            field.strip()
+            for field in str(contact_event_fields).split(",")
+            if field.strip()
+        }
+        self._include_full_contact_fields = (
+            str(contact_event_fields).strip() == "full"
+            or "full" in self._contact_event_field_set
+        )
         
         # Load action and proprio data
         with open(action_dir, "rb") as f:
@@ -141,6 +153,17 @@ class PushTSlotDataset(Dataset):
             with open(state_dir, "rb") as f:
                 state_data = pkl.load(f)
             self.state_data = state_data[split]
+
+        self.contact_event_data = None
+        self.contact_event_meta = None
+        if contact_event_dir is not None:
+            with open(contact_event_dir, "rb") as f:
+                contact_event_payload = pkl.load(f)
+            if "events" in contact_event_payload:
+                self.contact_event_meta = contact_event_payload.get("meta", {})
+                self.contact_event_data = contact_event_payload["events"][split]
+            else:
+                self.contact_event_data = contact_event_payload[split]
         
         # Build index: list of (video_id, start_frame) tuples
         self.samples = self._build_sample_index()
@@ -275,6 +298,49 @@ class PushTSlotDataset(Dataset):
             state_raw = self.state_data[video_id]
             state = torch.from_numpy(state_raw[frame_indices]).float()
             sample["state"] = state
-        
-        return sample
 
+        if self.contact_event_data is not None:
+            event_raw = self.contact_event_data[video_id]
+            contact = torch.from_numpy(event_raw["contact"][frame_indices].astype(np.float32)).float()
+            event_window = torch.from_numpy(event_raw["event_window"][frame_indices].astype(np.float32)).float()
+
+            sample["contact"] = contact
+            sample["event_window"] = event_window
+
+            include_distance = (
+                self._include_full_contact_fields
+                or "distance" in self._contact_event_field_set
+                or "contact_distance" in self._contact_event_field_set
+            )
+            if include_distance:
+                distance = torch.from_numpy(event_raw["distance"][frame_indices]).float()
+                sample["contact_distance"] = distance
+
+            if self._include_full_contact_fields:
+                onset = torch.from_numpy(event_raw["onset"][frame_indices].astype(np.float32)).float()
+                persistent = torch.from_numpy(event_raw["persistent"][frame_indices].astype(np.float32)).float()
+                release = torch.from_numpy(event_raw["release"][frame_indices].astype(np.float32)).float()
+                post_contact = torch.from_numpy(event_raw["post_contact"][frame_indices].astype(np.float32)).float()
+                event_mode = torch.from_numpy(event_raw["mode"][frame_indices].astype(np.int64)).long()
+                distance_delta = torch.from_numpy(event_raw["distance_delta"][frame_indices]).float()
+
+                sample["contact_onset"] = onset
+                sample["contact_persistent"] = persistent
+                sample["contact_release"] = release
+                sample["post_contact"] = post_contact
+                sample["event_mode"] = event_mode
+                sample["contact_distance_delta"] = distance_delta
+                sample["contact_event_features"] = torch.stack(
+                    [
+                        contact,
+                        onset,
+                        persistent,
+                        release,
+                        post_contact,
+                        distance / 512.0,
+                        distance_delta / 512.0,
+                    ],
+                    dim=-1,
+                )
+
+        return sample

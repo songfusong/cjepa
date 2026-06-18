@@ -97,7 +97,7 @@ def get_data(cfg):
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.batch_size,
-        num_workers=cfg.num_workers,
+        num_workers=cfg.get("num_val_workers", 0),
         pin_memory=True,
     )
     
@@ -344,8 +344,8 @@ def get_world_model(cfg):
     
     # Build action and proprioception encoders (will be trained)
     effective_act_dim = cfg.frameskip * cfg.dinowm.action_dim
-    action_encoder = swm.wm.dinowm.Embedder(in_chans=effective_act_dim, emb_dim=cfg.dinowm.action_embed_dim)
-    proprio_encoder = swm.wm.dinowm.Embedder(in_chans=cfg.dinowm.proprio_dim, emb_dim=cfg.dinowm.proprio_embed_dim)
+    action_encoder = Embedder(in_chans=effective_act_dim, emb_dim=cfg.dinowm.action_embed_dim)
+    proprio_encoder = Embedder(in_chans=cfg.dinowm.proprio_dim, emb_dim=cfg.dinowm.proprio_embed_dim)
 
     logging.info(f"Action dim: {effective_act_dim}, Proprio dim: {cfg.dinowm.proprio_dim}")
 

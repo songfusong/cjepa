@@ -108,7 +108,7 @@ class CausalWM_AP(torch.nn.Module):
 
         return info
 
-    def predict(self, embedding, use_inference_function: bool=False):
+    def predict(self, embedding, use_inference_function: bool=False, **predictor_kwargs):
         """predict next latent state
         Args:
             embedding: (B, T, P, d) - P can be num_patches or num_slots
@@ -120,7 +120,7 @@ class CausalWM_AP(torch.nn.Module):
             preds = self.predictor.inference(embedding)
             return preds
         else:
-            preds, mask_indices = self.predictor(embedding)
+            preds, mask_indices = self.predictor(embedding, **predictor_kwargs)
             return preds, mask_indices
 
         # Output: (B, num_pred, S, 64) or (B, T+num_pred, S, 64)
